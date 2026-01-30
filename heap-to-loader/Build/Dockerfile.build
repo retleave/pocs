@@ -1,0 +1,16 @@
+FROM ubuntu:22.04 as build
+
+RUN apt-get update && apt-get install -y \
+    gcc libc6-dev make \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+COPY src/heap-to-loader.c .
+
+RUN gcc heap-to-loader.c -o heap-to-loader \
+    -fstack-protector \
+    -Wl,-z,relro \
+    -Wl,-rpath,./ \
+    -Wl,-dynamic-linker,./ld-linux-x86-64.so.2 \
+    -g -s

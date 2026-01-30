@@ -1,0 +1,16 @@
+FROM ubuntu:22.04 as build
+
+RUN apt-get update && apt-get install -y \
+    gcc libc6-dev make \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+COPY src/ret2dso.c .
+
+RUN gcc ret2dso.c -o ret2dso \
+    -fstack-protector-all \
+    -Wl,-z,relro \
+    -Wl,-rpath,./ \
+    -Wl,-dynamic-linker,./ld-linux-x86-64.so.2 \
+    -s
