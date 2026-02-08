@@ -1,4 +1,4 @@
-![preview](https://lowlevel.re/uploads/1770581388089.png)
+![preview](https://lowlevel.re/uploads/1770593011664.png)
 
 ## Abstract
 
