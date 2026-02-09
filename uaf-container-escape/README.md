@@ -34,6 +34,33 @@ User shell on a 6.1.161 kernel, sandboxed with nsjail:
 
 ---
 
+## Assumptions and Scope
+
+This exploit relies on a number of explicit assumptions about the target environment.
+These assumptions are intentional and reflect common properties of modern Linux
+distribution kernels.
+
+The following conditions are assumed:
+
+- `struct msg_msg` allocations originate from predictable kmalloc caches
+  (in particular kmalloc-1024 for large messages), without per-object randomization.
+- SLUB freelist hardening is enabled, but without delayed reuse or quarantine mechanisms.
+- System V IPC is available and not restricted by LSM policy.
+- No additional heap isolation interferes with deterministic object reuse.
+
+The exploit does **not** rely on:
+
+- kernel symbol disclosure
+- `/proc` or debug interfaces
+- timing races
+- speculative execution or undefined behavior
+
+Kernel-specific offsets are used for concreteness in this proof-of-concept, but the
+exploitation strategy itself relies on allocator and IPC invariants rather than
+version-specific quirks.
+
+---
+
 ## 3. Vulnerable Kernel Interface
 
 The target kernel module exposes a misc device named `/dev/session`. Internally, it manages a single global `struct session` object, allocated and freed via ioctl commands.
@@ -165,11 +192,19 @@ Once freed, `sess` may be reallocated by an unrelated kernel object while still 
 
 ---
 
-## 4. Exploitation Invariant
+## 4. Exploitation Invariants
 
-**Invariant:** If a freed kernel object can be reliably reclaimed with attacker-controlled data and subsequently dereferenced, arbitrary kernel memory corruption is achievable.
+Rather than relying on fragile offsets or timing assumptions, this exploit is built
+around a small set of stable kernel invariants:
 
-This invariant guides the exploitation strategy described in the following sections.
+1. Freed heap objects may be reallocated by unrelated subsystems.
+2. Certain kernel objects (`msg_msg`) trust internal metadata influenced by user space.
+3. Allocator hardening mechanisms can be reversed when multiple related leaks exist.
+4. Kernel data structures form navigable graphs once arbitrary read is achieved.
+5. Kernel control-flow integrity assumes allocator consistency.
+
+Each stage of the exploit either leverages or temporarily violates these invariants
+until the final control-flow hijack.
 
 ---
 
@@ -215,9 +250,13 @@ With `MSG_COPY`, the kernel:
 
 This dramatically increases the exploitation surface:
 
-* Dangling or corrupted list pointers are traversed repeatedly
-* Corrupted size fields influence copy semantics
-* An attacker can *observe effects of corruption without destroying the object*
+Crucially, `MSG_COPY` allows observing corrupted message state without consuming or
+freeing the underlying object. This turns a transient heap corruption into a persistent
+oracle: the same corrupted object can be inspected repeatedly, enabling iterative
+refinement of heap state without destabilizing the kernel.
+
+This property is essential for reliability and distinguishes this approach from
+single-shot exploitation techniques.
 
 In practice, this enables repeated probing of corrupted state and turns transient corruption into a reusable oracle.
 
@@ -467,6 +506,22 @@ Advantages of this method:
 
 In practice, this approach proved both faster and more reliable than automated gadget enumeration when building kernel ROP chains.
 
+### Freelist Repair and Heap Consistency
+
+Earlier stages of the exploit intentionally corrupt SLUB freelist metadata in order
+to gain arbitrary read and write primitives. Leaving the allocator in a corrupted
+state, however, significantly reduces post-exploitation stability.
+
+Before executing sensitive kernel routines, the exploit explicitly repairs the
+freelist head pointer as part of the ROP chain. This restores allocator invariants
+and prevents secondary crashes caused by subsequent kernel allocations.
+
+Rather than exploiting the kernel *against* its assumptions, the exploit temporarily
+violates them and then restores consistency before resuming normal execution.
+
+This repair step is not strictly required for privilege escalation, but is essential
+for reliable post-exploitation behavior.
+
 ### Full ROP chain to escape & be root
 
 ```c
@@ -643,6 +698,18 @@ Restricting or namespacing System V IPC could reduce cross-context abuse. In pra
 
 Ultimately, memory safety violations in kernel code remain exploitable despite incremental hardening. Eliminating entire bug classes—rather than patching symptoms—is the only robust solution.
 
+## Why Not a Simpler Exploit?
+
+Several seemingly simpler exploitation strategies were intentionally avoided:
+
+- Direct kernel write primitives tend to destabilize the allocator early.
+- Timing races introduce non-determinism and reduce reliability.
+- Brute-force techniques are ineffective against modern hardening.
+- Symbol-based leaks are increasingly unavailable on production systems.
+
+The chosen approach favors deterministic reuse, observable corruption, and incremental
+state recovery over opportunistic shortcuts.
+
 ---
 
 ## 17. Conclusion
@@ -650,6 +717,12 @@ Ultimately, memory safety violations in kernel code remain exploitable despite i
 Source code & environment setup: https://github.com/retleave/pocs
 
 This paper demonstrates that kernel heap UAF vulnerabilities remain fully exploitable on modern Linux systems. By relying on allocator invariants rather than fragile offsets, reliable exploitation is achievable even under significant hardening.
+
+The key takeaway is not that a specific vulnerability is exploitable, but that entire
+classes of kernel heap lifetime violations remain exploitable despite incremental
+hardening. As long as global objects, trusted metadata, and cross-subsystem allocation
+reuse coexist, reliable exploitation remains possible.
+
 
 ---
 
