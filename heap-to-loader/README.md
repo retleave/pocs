@@ -44,11 +44,10 @@ This threat model reflects realistic post-mitigation exploitation scenarios and 
 
 ### Environment
 
-* glibc 2.38 (Ubuntu 24.04)
-* ld-linux-x86-64.so.2 2.38
-* GCC 13.2.0
-* Linux 6.8.0 (x86_64)
-* Full RELRO, PIE, NX, ASLR enabled
+* glibc 2.35 (Ubuntu 22.04)
+* ld-linux-x86-64.so.2 2.35
+* GCC 11.4.0
+* x86_64, Full RELRO, PIE, NX, ASLR enabled
 
 ---
 
