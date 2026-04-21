@@ -27,6 +27,14 @@ The origin of the primitive (heap overflow, stack corruption, type confusion, lo
 
 This threat model reflects modern post-mitigation exploitation scenarios where information disclosure is unavailable but partial corruption remains possible.
 
+### Environment
+
+* glibc 2.38 (Ubuntu 24.04)
+* ld-linux-x86-64.so.2 2.38
+* GCC 13.2.0
+* Linux 6.8.0 (x86_64)
+* Full RELRO, PIE, NX, ASLR enabled
+
 ---
 
 ## 2. ret2dlresolve — The Underlying Invariant
@@ -105,18 +113,13 @@ Despite eager binding:
 
 ## 6. Relativity Under ASLR
 
-> **Note on ASLR and relative mappings**
-> Linux ASLR does not guarantee fixed relative offsets between DSOs. However, the dynamic loader enforces a constrained and ordered mapping of core objects (`ld.so`, `libc`, stdio globals). ret2dso does not rely on an exact offset, but on the existence of a loader-relative writable region reachable from a stable anchor object (e.g. `_IO_2_1_stdin_`) using a weak write primitive.
-
-ASLR randomizes absolute addresses, but in practice the loader enforces a constrained and ordered layout:
+ASLR randomizes absolute addresses, but the dynamic loader enforces a constrained and ordered layout of core objects:
 
 * `stdin` ↔ libc
 * libc ↔ ld.so
 * loader writable segments ↔ loader metadata
 
-ret2dso relies solely on **relative positioning**, not absolute disclosure.
-
-Importantly, ret2dso requires reachability rather than predictability: no fixed offset, brute force, or probabilistic assumption is required.
+Linux ASLR does not guarantee fixed relative offsets between DSOs. However, ret2dso does not require a fixed offset — it requires **reachability**: the existence of a loader-relative writable region reachable from a stable anchor object (e.g. `_IO_2_1_stdin_`) using a weak write primitive. No brute force or probabilistic assumption is required.
 
 ---
 

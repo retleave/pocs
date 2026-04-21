@@ -42,6 +42,14 @@ The attacker cannot:
 
 This threat model reflects realistic post-mitigation exploitation scenarios and explicitly forbids classic shortcuts commonly relied upon in historical heap exploits.
 
+### Environment
+
+* glibc 2.38 (Ubuntu 24.04)
+* ld-linux-x86-64.so.2 2.38
+* GCC 13.2.0
+* Linux 6.8.0 (x86_64)
+* Full RELRO, PIE, NX, ASLR enabled
+
 ---
 
 ## 2. High-Level Invariant
@@ -211,15 +219,17 @@ This represents a **semantic pivot**: allocator behavior changes without violati
 
 ## 8. Primitive #2 — Signed Index Confusion
 
-Negative indices passed to `destroy()` cause unintended pointers derived from heap memory to be freed.
+The `destroy()` function checks `idx >= MAX` but does not reject negative values. The `table` array is located in the BSS section, and at negative offsets lies the `heapbase` pointer — initialized during `getheap()` to point to the base of the heap arena.
 
-glibc accepts these pointers as valid chunk addresses, modeling a common class of real-world sign and bounds bugs.
+When `destroy(-4)` is called, the program computes `table[-4]`, which reads the `heapbase` pointer and passes it to `free()`. This effectively frees the **tcache\_perthread\_struct** located at the beginning of the heap, since glibc places this metadata structure at the base of the initial heap mapping.
+
+glibc accepts this pointer as a valid chunk address without validating its provenance, modeling a common class of real-world sign and bounds bugs.
 
 ---
 
 ## 9. Freeing Tcache Metadata Itself
 
-With tcache saturated, freeing heap base causes **tcache metadata itself** to be interpreted as an unsorted bin chunk.
+With tcache saturated (7 entries in tcache\[0x290\]), the `free()` of `heapbase` causes **tcache\_perthread\_struct itself** to be interpreted as an unsorted bin chunk.
 
 > Allocator bookkeeping data becomes attacker-controlled heap data.
 

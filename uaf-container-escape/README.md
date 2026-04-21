@@ -28,32 +28,26 @@ We assume the attacker has:
 
 The origin of the vulnerability (debug module, third-party driver, CTF challenge, etc.) is considered out of scope.
 
-User shell on a 6.1.161 kernel, sandboxed with nsjail:
-
-![user-shell](https://lowlevel.re/uploads/1770581367196.png)
-
----
-
-## Assumptions and Scope
-
-This exploit relies on a number of explicit assumptions about the target environment.
-These assumptions are intentional and reflect common properties of modern Linux
-distribution kernels.
-
 The following conditions are assumed:
 
-- `struct msg_msg` allocations originate from predictable kmalloc caches
-  (in particular kmalloc-1024 for large messages), without per-object randomization.
+- `struct msg_msg` allocations originate from predictable kmalloc caches (in particular kmalloc-1024 for large messages), without per-object randomization.
 - SLUB freelist hardening is enabled, but without delayed reuse or quarantine mechanisms.
 - System V IPC is available and not restricted by LSM policy.
 - No additional heap isolation interferes with deterministic object reuse.
 
-The exploit does **not** rely on:
+The exploit does **not** rely on kernel symbol disclosure, `/proc` or debug interfaces, timing races, or speculative execution.
 
-- kernel symbol disclosure
-- `/proc` or debug interfaces
-- timing races
-- speculative execution or undefined behavior
+### Environment
+
+* Linux 6.1.161 (x86_64)
+* SLUB allocator with `CONFIG_SLAB_FREELIST_HARDENED=y`
+* KASLR, SMEP, SMAP enabled
+* nsjail container sandbox
+* GCC 12.2.0
+
+User shell sandboxed with nsjail:
+
+![user-shell](https://lowlevel.re/uploads/1770581367196.png)
 
 Kernel-specific offsets are used for concreteness in this proof-of-concept, but the
 exploitation strategy itself relies on allocator and IPC invariants rather than
@@ -205,6 +199,26 @@ around a small set of stable kernel invariants:
 
 Each stage of the exploit either leverages or temporarily violates these invariants
 until the final control-flow hijack.
+
+### Kernel-Specific Constants
+
+The following offsets are specific to the target kernel (6.1.161) and must be adjusted for other versions:
+
+```c
+#define SPRAY_MSG_SIZE      0x2000
+#define KMALLOC_1024_SIZE   0x400
+#define MSG_NEXT_BUF_OFFSET 0xfc8     // offset to next msg_msg payload in leaked data
+#define MSG_FD2_OFFSET      0x30      // freelist pointer #1 in leaked SLUB metadata
+#define MSG_FD3_OFFSET      0x70      // freelist pointer #2 in leaked SLUB metadata
+#define MSG_KMALLOC_PTR     0x10      // offset to kmalloc-1024 pointer in leaked chain
+#define TASK_NEXT_OFFSET    0x4a0     // offsetof(struct task_struct, tasks.next)
+#define TASK_COMM_OFFSET    0x778     // offsetof(struct task_struct, comm)
+#define TASK_STACK_OFFSET   0x20      // offsetof(struct task_struct, stack)
+#define TASK_FS_OFFSET      0x7a8     // offsetof(struct task_struct, fs)
+#define TASK_SAFE_OFFSET    0x38      // safe dereference offset within task_struct
+#define RET_OFFSET          0x3f08    // saved return address offset on kernel stack
+#define RSP_DELTA           0x20      // stack alignment correction for iretq
+```
 
 ---
 
