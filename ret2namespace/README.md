@@ -1,14 +1,41 @@
+![ret2namespace](/uploads/preview-ret2namespace.png)
+
 ## Abstract
 
 Starting with glibc 2.39, distributions build libc with `BIND_NOW`, eagerly resolving all PLT entries at load time. This kills **ret2dso** and every other technique that relies on lazy symbol resolution through `_dl_runtime_resolve`.
 
-We introduce **ret2namespace**, a technique that achieves **arbitrary code execution on glibc 2.39–2.43+** by corrupting the dynamic loader's **namespace metadata** to bypass `_IO_vtable_check` — the last line of defense against FILE-based control-flow hijacking.
+This paper revisits **namespace injection** — a vtable check bypass [first described by CptGibbon in 2019](https://github.com/CptGibbon/House-of-Corrosion) (House of Corrosion, glibc 2.29) — and demonstrates that it **remains fully functional on modern glibc (2.39–2.43+) under BIND_NOW**, despite significant internal struct changes across versions.
 
-The technique requires a **single libc address leak** and a **relative byte-wise write** anchored at a libc object. No TLS pointer guard leak, no ROP chain, no brute force.
+We provide the first **working exploit implementation** of the technique, document the **structural changes** between glibc 2.29, 2.41, and 2.43 that affect offsets and trigger mechanics, and identify a **new behavioral constraint** in glibc 2.43 where unbuffered stdin bypasses vtable dispatch entirely.
 
 ---
 
-## 1. Motivation — BIND_NOW Killed ret2dso
+## 1. Prior Art — House of Corrosion
+
+The namespace injection bypass for `_IO_vtable_check` was first documented by [CptGibbon (2019)](https://github.com/CptGibbon/House-of-Corrosion) as part of the House of Corrosion technique. The original work described the concept against **glibc 2.29** (Ubuntu 19.04):
+
+- Set `l_ns = 1` on libc's `link_map`
+- Transplant libc from namespace 0 to namespace 1 in `_rtld_global`
+- Increment `_dl_nns` so the search iterates into ns1
+- `_IO_vtable_check` sees `l_ns != 0` → vtable accepted
+
+The original paper provided a detailed writeup but **no functional exploit code**, and targeted a pre-BIND_NOW glibc where the technique was one option among many (lazy PLT hijacking, GOT overwrites, etc.).
+
+### What this paper adds
+
+Since 2019, three things changed:
+
+1. **BIND_NOW became the default.** Ubuntu 24.04+, Debian 13+, and Fedora 39+ build libc with `--enable-bind-now`. This killed ret2dso, GOT overwrites, and every lazy-resolution technique. Namespace injection went from "one option among many" to **one of the few remaining vtable bypass paths** that doesn't require a TLS pointer guard leak.
+
+2. **glibc internals changed significantly.** `struct link_namespaces` shrank from `0xa0` bytes (2.29–2.41) to `0x70` bytes (2.43) after the removal of `_ns_debug_unused`. Every offset in the technique shifted. The `_IO_vtable_check` assembly changed. The vtable dispatch slot moved. None of this was documented for exploitation.
+
+3. **A new behavioral constraint appeared.** On glibc 2.43, `getchar()` on unbuffered stdin (`setbuf(stdin, NULL)`) performs a direct `read(2)` syscall **without consulting the vtable**. This silently breaks any exploit that relies on unbuffered stdio as a trigger — a trap that doesn't exist on 2.41 or earlier.
+
+This paper provides the **first working proof-of-concept** of namespace injection on glibc 2.39–2.43, documents the offset changes across versions, and identifies the unbuffered stdin constraint.
+
+---
+
+## 2. Motivation — BIND_NOW Killed ret2dso
 
 ret2dso worked by corrupting `DT_SYMTAB` in a `link_map` so that a runtime call to `_dl_find_dso_for_object` — which traversed the PLT — triggered `_dl_runtime_resolve` on a forged symbol. The loader computed `st_value + l_addr` and jumped to the attacker's target.
 
@@ -18,7 +45,7 @@ This depended on **lazy binding**: libc's PLT stubs pointed to the resolver, not
 
 ---
 
-## 2. The Vtable Check — `_IO_vtable_check`
+## 3. The Vtable Check — `_IO_vtable_check`
 
 Glibc protects FILE structures with vtable validation. Every stdio operation (`getchar`, `fgets`, `fwrite`, ...) dispatches through a vtable pointer at `FILE + 0xd8`. Before dispatch, the code checks whether the vtable falls within `__libc_IO_vtables`, a read-only section in libc:
 
@@ -29,7 +56,7 @@ if ((uintptr_t)(vtable - __libc_IO_vtables) > VTABLE_SECTION_SIZE)
 
 If the vtable is outside the valid range, `_IO_vtable_check` is called. This function decides whether to accept or abort:
 
-```asm
+```x86asm
 _IO_vtable_check:
   ; CHECK A: pointer guard validation
   mov rax, [mangled_ptr]      ; mangled function pointer in libc .data
@@ -66,7 +93,7 @@ Check C exists to support `dlmopen()` — shared objects loaded into non-default
 
 ---
 
-## 3. Namespace Internals
+## 4. Namespace Internals
 
 The dynamic loader maintains an array of 16 namespace slots in `_rtld_global`:
 
@@ -115,14 +142,14 @@ Two critical observations:
 
 ---
 
-## 4. The Technique
+## 5. The Technique
 
-ret2namespace injects libc's `link_map` into namespace 1 so that `_IO_vtable_check` sees `l_ns = 1` and accepts the forged vtable.
+The technique injects libc's `link_map` into namespace 1 so that `_IO_vtable_check` sees `l_ns = 1` and accepts the forged vtable.
 
 ### Step-by-step
 
 **Step 1 — Unlink libc from namespace 0.**
-Zero `vdso_lm->l_next` to remove libc from the ns0 chain. Without this, `_dl_find_dso_for_object` would find libc in ns0, check `l_ns == 0`, and the assert would pass — but `_IO_vtable_check` would see `l_ns == 0` and abort.
+Zero `vdso_lm->l_next` to remove libc from the ns0 chain. Without this, `_dl_find_dso_for_object` would find libc in ns0, and `_IO_vtable_check` would see `l_ns == 0` and abort.
 
 **Step 2 — Set `libc_lm->l_ns = 1`.**
 Single byte write at `libc_lm + 0x30`.
@@ -161,7 +188,7 @@ Total: **42 bytes**, of which only `ns[1]._ns_loaded` requires an absolute addre
 
 ---
 
-## 5. Threat Model
+## 6. Threat Model
 
 The attacker has:
 
@@ -182,26 +209,29 @@ The attacker does **not** need:
 
 ---
 
-## 6. glibc Version Differences
+## 7. glibc Version Differences
 
 The namespace struct size changed between glibc 2.41 and 2.43 due to the removal of `_ns_debug_unused` (`struct r_debug_extended`, 48 bytes):
 
-| | glibc 2.41 | glibc 2.43 |
-|---|---|---|
-| `sizeof(struct link_namespaces)` | **0xa0** | **0x70** |
-| `ns[1]._ns_loaded` in `_rtld_global` | +0xa0 | +0x70 |
-| `_dl_nns` in `_rtld_global` | +0xa00 | +0x700 |
-| `__uflow` vtable slot | +0x28 | +0x28 |
+| | glibc 2.29 (original) | glibc 2.41 | glibc 2.43 |
+|---|---|---|---|
+| `sizeof(struct link_namespaces)` | **0xa0** | **0xa0** | **0x70** |
+| `ns[1]._ns_loaded` in `_rtld_global` | +0xa0 | +0xa0 | +0x70 |
+| `_dl_nns` in `_rtld_global` | +0xa00 | +0xa00 | +0x700 |
+| `__uflow` vtable slot | +0x28 | +0x28 | +0x28 |
+| `BIND_NOW` on libc | **No** | **Yes** | **Yes** |
 
-The technique works on both. Only the offsets change.
+The technique works on all three. The offsets shift, but the mechanism is identical.
 
 ### Note on glibc 2.43 and unbuffered stdin
 
 On glibc 2.43, `getchar()` on an unbuffered stdin (`setbuf(stdin, NULL)`) performs a direct `read(2)` syscall without consulting the vtable. The trigger requires stdin to be in **default buffered mode** so that `getchar()` goes through `__uflow` → vtable dispatch to fill the internal buffer. This is the default behavior for programs that do not explicitly call `setbuf(stdin, NULL)`.
 
+This constraint does not exist on glibc 2.41 or earlier, where `getchar()` always dispatches through the vtable regardless of buffering mode. **An exploit that works on 2.41 may silently fail on 2.43 if stdin is unbuffered** — a subtle portability trap with no visible error.
+
 ---
 
-## 7. Proof of Concept — Vulnerable Program
+## 8. Proof of Concept — Vulnerable Program
 
 ```c
 #include <stdio.h>
@@ -249,7 +279,7 @@ The write loop uses `read(2)` to avoid touching stdio state. `stdin` is left in 
 
 ---
 
-## 8. Proof of Concept — Exploit
+## 9. Proof of Concept — Exploit
 
 ```python
 #!/usr/bin/env python3
@@ -312,7 +342,7 @@ p.interactive()
 
 ---
 
-## 9. Execution Flow
+## 10. Execution Flow
 
 ```
 getchar()
@@ -337,32 +367,34 @@ getchar()
 
 ---
 
-## 10. Comparison with Existing Techniques
+## 11. Comparison with Existing Techniques
 
-| | ret2dso | House of Apple 2 | ret2namespace |
-|---|---|---|---|
-| **Bypass target** | Full RELRO (symbol resolution) | vtable check (wide vtable chain) | vtable check (namespace injection) |
-| **Works under BIND_NOW** | No | Yes | **Yes** |
-| **Leak required** | None (relative only) | libc + heap | **libc only** |
-| **TLS pointer guard** | Not needed | Not needed (but complex chain) | **Not needed** |
-| **Structures to forge** | 1 `Elf64_Sym` | `_wide_data` + wide vtable + FILE fields | **1 vtable (8 bytes)** |
-| **Brute force** | None | None | **None** |
-| **Complexity** | Low | High (multi-struct chain) | **Low** |
+| | ret2dso | House of Apple 2 | House of Corrosion | ret2namespace |
+|---|---|---|---|---|
+| **Bypass target** | Full RELRO | vtable check (wide chain) | vtable check (namespace) | vtable check (namespace) |
+| **Works under BIND_NOW** | No | Yes | **Not tested** | **Yes** |
+| **Tested glibc** | 2.35 | 2.35+ | **2.29** | **2.39–2.43** |
+| **Leak required** | None | libc + heap | libc + heap | **libc only** |
+| **TLS pointer guard** | Not needed | Not needed | Not needed | **Not needed** |
+| **Structures to forge** | 1 `Elf64_Sym` | `_wide_data` + wide vtable + FILE | loader metadata | **loader metadata** |
+| **Working exploit** | Yes | Yes | **No (description only)** | **Yes** |
+| **Unbuffered stdin note** | N/A | N/A | N/A | **Documented** |
 
-ret2namespace trades the simplicity of ret2dso's zero-leak model for a single libc leak, but in return works on all modern distributions with BIND_NOW enabled. Compared to House of Apple 2, it eliminates the need to forge multiple interdependent structures (`_wide_data`, wide vtable, coherent FILE fields) — the fake vtable is a single pointer at a single offset.
+ret2namespace is not a new bypass primitive — the namespace injection concept belongs to House of Corrosion (2019). The contribution here is validating and adapting it for modern BIND_NOW distributions where it has become one of the few viable paths, providing the first functional exploit, and documenting the structural changes and behavioral traps across glibc versions.
 
 ---
 
-## 11. Security Implications
+## 12. Security Implications
 
 - `_IO_vtable_check`'s namespace exception was designed for `dlmopen` plugins, but can be triggered by corrupting loader metadata from userspace
 - The dynamic loader's namespace state (`link_map` chains, `_dl_nns`, `l_ns` fields) remains writable and implicitly trusted
 - A single libc pointer leak is sufficient to reconstruct all absolute addresses needed for the technique
 - `BIND_NOW` closes the lazy resolution surface but does not protect the namespace validation path
+- The namespace bypass documented in 2019 (glibc 2.29) still works unchanged on glibc 2.43 — the underlying trust model has not been hardened in 7 years
 
 ---
 
-## 12. Mitigation Discussion
+## 13. Mitigation Discussion
 
 Potential mitigations:
 
@@ -375,11 +407,11 @@ All approaches involve trade-offs between compatibility, performance, and securi
 
 ---
 
-## 13. Conclusion
+## 14. Conclusion
 
-ret2namespace demonstrates that the dynamic loader's namespace metadata is a viable attack surface for bypassing `_IO_vtable_check` on modern glibc with `BIND_NOW`.
+The namespace injection bypass for `_IO_vtable_check`, first described by CptGibbon in 2019, remains fully functional on glibc 2.39–2.43 under BIND_NOW — the exact configuration shipping on every major Linux distribution today.
 
-The technique is the logical successor to ret2dso: both exploit the loader's implicit trust in its own writable metadata. Where ret2dso abused symbol resolution, ret2namespace abuses namespace validation. The attack surface shifted, but the underlying trust assumption — that loader metadata is immutable after load time — remains broken.
+With lazy resolution dead, the set of viable vtable bypass techniques has narrowed. Namespace injection stands as one of the simplest: 42 bytes of writes, a single libc leak, no TLS, no ROP. The fact that the underlying trust model (writable loader metadata, unchecked `l_ns` field) has not changed in 7 years suggests that hardening loader runtime state remains an open problem.
 
 ---
 
