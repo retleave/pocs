@@ -1,0 +1,10 @@
+services:
+  jail:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ret2namespace_jail
+    ports:
+      - "1448:1448"
+    privileged: true
+    restart: unless-stopped

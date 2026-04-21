@@ -1,0 +1,18 @@
+FROM ubuntu:25.04 as build
+
+RUN apt-get update && apt-get install -y \
+    gcc libc6-dev make \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+COPY src/ret2namespace.c .
+COPY src/libc.so.6 /usr/lib/x86_64-linux-gnu/libc.so.6
+COPY src/ld-linux-x86-64.so.2 /usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2
+
+RUN gcc ret2namespace.c -o ret2namespace \
+    -pie -fPIE \
+    -Wl,-z,relro,-z,now \
+    -Wl,-rpath,./ \
+    -Wl,-dynamic-linker,./ld-linux-x86-64.so.2 \
+    -s
